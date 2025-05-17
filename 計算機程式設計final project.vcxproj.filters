@@ -23,7 +23,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main7.c">
+    <ClCompile Include="main5.c">
       <Filter>來源檔案</Filter>
     </ClCompile>
   </ItemGroup>

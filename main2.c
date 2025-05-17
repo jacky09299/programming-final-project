@@ -1,340 +1,471 @@
+﻿#define _CRT_SECURE_NO_WARNINGS // 如果您仍想用 sprintf 或其他被 MSVC 認為不安全的函式
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
 #include <time.h>
-#include <allegro5/allegro5.h>
+
+#include <allegro5/allegro.h>
 #include <allegro5/allegro_primitives.h>
+#include <allegro5/allegro_image.h>
 #include <allegro5/allegro_font.h>
 #include <allegro5/allegro_ttf.h>
+#include <allegro5/allegro_audio.h>
+#include <allegro5/allegro_acodec.h>
 
-#define SCREEN_W 800
-#define SCREEN_H 600
+// --- 常數定義 ---
+#define SCREEN_WIDTH 800
+#define SCREEN_HEIGHT 600
 #define FPS 60.0
 
-#define PLAYER_RADIUS 25.0f
-#define ENEMY_RADIUS 20.0f
-// --- Player Movement ---
-#define PLAYER_MAX_SPEED 4.0f     // ���a�i�H�F�쪺�̤j�t��
-#define PLAYER_ACCELERATION 0.2f // ���a�C�V���[�t��
-// --- Enemy Movement ---
-#define ENEMY_INIT_MAX_SPEED 1.5f // �ĤH��l�H���t�ת��̤j��
-#define NUM_ENEMIES 5
+// --- 新增：定義遊戲物件的目標繪製尺寸 ---
+#define PLAYER_TARGET_WIDTH 64
+#define PLAYER_TARGET_HEIGHT 64
+#define ENEMY_TARGET_WIDTH 32
+#define ENEMY_TARGET_HEIGHT 32
+#define STAR_TARGET_WIDTH 32
+#define STAR_TARGET_HEIGHT 32
 
-// --- Softness Parameters ---
-#define DEFORMATION_DURATION 0.3f
-#define DEFORMATION_FACTOR_PRIMARY 0.5f
-#define DEFORMATION_FACTOR_SECONDARY 1.4f
-#define COEFFICIENT_OF_RESTITUTION 0.75f
-#define WALL_COEFFICIENT_OF_RESTITUTION 0.6f
+// --- 資源檔案路徑 ---
+// 建議將圖片檔案放在執行檔旁邊，並使用相對路徑
+#define PLAYER_IMG_PATH "player.png"
+#define STAR_IMG_PATH "star.jfif" // 例如: "star.jfif" 或 "images/star.jfif"
+#define ENEMY_IMG_PATH "enemy.png" // 例如: "enemy.png" 或 "images/enemy.png"
+#define BACKGROUND_IMG_PATH "background.png"
+#define FONT_PATH "arial.ttf" // 請確保此字型檔案存在
+#define BGM_PATH "bgm.mp3"
+#define COLLECT_SFX_PATH "collect.mp3"
+#define HIT_SFX_PATH "hit.mp3"
 
-#define BALL_SPRITE_RADIUS 32.0f
+// --- 全域變數 ---
+ALLEGRO_DISPLAY* display = NULL;
+ALLEGRO_EVENT_QUEUE* event_queue = NULL;
+ALLEGRO_TIMER* timer = NULL;
 
-#ifndef ALLEGRO_PI
-#define ALLEGRO_PI 3.14159265358979323846
-#endif
+ALLEGRO_BITMAP* player_image = NULL;
+ALLEGRO_BITMAP* star_image = NULL;
+ALLEGRO_BITMAP* enemy_image = NULL;
+ALLEGRO_BITMAP* background_image = NULL;
+ALLEGRO_FONT* game_font = NULL;
+ALLEGRO_FONT* score_font = NULL;
+
+ALLEGRO_SAMPLE* collect_sfx = NULL;
+ALLEGRO_SAMPLE* hit_sfx = NULL;
+ALLEGRO_AUDIO_STREAM* bgm = NULL;
+
+bool game_running = true;
+bool redraw = true;
+
+float player_x, player_y;
+float player_speed = 4.0;
+int player_width = 0, player_height = 0; // 這些將被設為目標尺寸
 
 typedef struct {
     float x, y;
-    float vx, vy;
-    float base_radius;
-    float current_radius_primary;
-    float current_radius_secondary;
-    ALLEGRO_COLOR color;
-    bool is_deforming;
-    double deformation_start_time;
-    float deformation_angle;
-} SoftBall;
+    int width, height; // 這些將被設為目標尺寸
+    bool active;
+    ALLEGRO_BITMAP* image; // 指向原始圖片
+} Collectible;
+#define MAX_STARS 1
+Collectible stars[MAX_STARS];
 
-ALLEGRO_BITMAP* ball_sprite = NULL;
+typedef struct {
+    float x, y;
+    int width, height; // 這些將被設為目標尺寸
+    float speed;
+    int direction;
+    ALLEGRO_BITMAP* image; // 指向原始圖片
+} Enemy;
+#define MAX_ENEMIES 1
+Enemy enemies[MAX_ENEMIES];
 
-float dist_sq(float x1, float y1, float x2, float y2) {
-    float dx = x1 - x2;
-    float dy = y1 - y2;
-    return dx * dx + dy * dy;
-}
+int score = 0;
+bool game_over = false;
 
-void init_ball(SoftBall* ball, float x, float y, float radius, ALLEGRO_COLOR color, float initial_vx, float initial_vy) {
-    ball->x = x;
-    ball->y = y;
-    ball->vx = initial_vx;
-    ball->vy = initial_vy;
-    ball->base_radius = radius;
-    ball->current_radius_primary = radius;
-    ball->current_radius_secondary = radius;
-    ball->color = color;
-    ball->is_deforming = false;
-    ball->deformation_start_time = 0;
-    ball->deformation_angle = 0;
-}
-
-// Overload for enemies with random speed
-void init_enemy_ball(SoftBall* ball, float x, float y, float radius, ALLEGRO_COLOR color, float speed_range) {
-    float vx = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * speed_range;
-    float vy = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * speed_range;
-    init_ball(ball, x, y, radius, color, vx, vy);
-}
+// --- 函數聲明 (部分) ---
+bool engine_initialize();
+void engine_load_resources();
+void engine_handle_input(ALLEGRO_EVENT* ev);
+void engine_update();
+void engine_render();
+void engine_cleanup();
+void init_player();
+void init_collectibles();
+void init_enemies();
+bool check_collision(float x1, float y1, int w1, int h1, float x2, float y2, int w2, int h2);
 
 
-void trigger_deformation(SoftBall* ball, double current_time, float collision_nx, float collision_ny) {
-    ball->is_deforming = true;
-    ball->deformation_start_time = current_time;
-    ball->deformation_angle = atan2(collision_ny, collision_nx);
-}
-
-void update_deformation(SoftBall* ball, double current_time) {
-    if (ball->is_deforming) {
-        double elapsed = current_time - ball->deformation_start_time;
-        if (elapsed >= DEFORMATION_DURATION) {
-            ball->is_deforming = false;
-            ball->current_radius_primary = ball->base_radius;
-            ball->current_radius_secondary = ball->base_radius;
-        }
-        else {
-            float progress_rad = (elapsed / DEFORMATION_DURATION) * ALLEGRO_PI;
-            float deformation_phase = sin(progress_rad);
-            ball->current_radius_primary = ball->base_radius * (1.0f - deformation_phase * (1.0f - DEFORMATION_FACTOR_PRIMARY));
-            ball->current_radius_secondary = ball->base_radius * (1.0f + deformation_phase * (DEFORMATION_FACTOR_SECONDARY - 1.0f));
-        }
-    }
-}
-
-void update_ball_position(SoftBall* ball, double current_time) {
-    ball->x += ball->vx;
-    ball->y += ball->vy;
-
-    bool collided_wall = false;
-    float wall_collision_nx = 0, wall_collision_ny = 0;
-
-    if (ball->x - ball->base_radius < 0) {
-        ball->x = ball->base_radius;
-        ball->vx *= -WALL_COEFFICIENT_OF_RESTITUTION;
-        collided_wall = true; wall_collision_nx = 1.0f; wall_collision_ny = 0.0f;
-    }
-    else if (ball->x + ball->base_radius > SCREEN_W) {
-        ball->x = SCREEN_W - ball->base_radius;
-        ball->vx *= -WALL_COEFFICIENT_OF_RESTITUTION;
-        collided_wall = true; wall_collision_nx = -1.0f; wall_collision_ny = 0.0f;
-    }
-    if (ball->y - ball->base_radius < 0) {
-        ball->y = ball->base_radius;
-        ball->vy *= -WALL_COEFFICIENT_OF_RESTITUTION;
-        if (collided_wall) {
-            wall_collision_nx = (wall_collision_nx + 0.0f); // Don't divide by 2 here, normalize later
-            wall_collision_ny = (wall_collision_ny + 1.0f);
-        }
-        else {
-            collided_wall = true; wall_collision_nx = 0.0f; wall_collision_ny = 1.0f;
-        }
-    }
-    else if (ball->y + ball->base_radius > SCREEN_H) {
-        ball->y = SCREEN_H - ball->base_radius;
-        ball->vy *= -WALL_COEFFICIENT_OF_RESTITUTION;
-        if (collided_wall) {
-            wall_collision_nx = (wall_collision_nx + 0.0f);
-            wall_collision_ny = (wall_collision_ny - 1.0f);
-        }
-        else {
-            collided_wall = true; wall_collision_nx = 0.0f; wall_collision_ny = -1.0f;
-        }
-    }
-
-    if (collided_wall) {
-        float len_sq = wall_collision_nx * wall_collision_nx + wall_collision_ny * wall_collision_ny;
-        if (len_sq > 0.001f) {
-            float len = sqrt(len_sq);
-            wall_collision_nx /= len;
-            wall_collision_ny /= len;
-            trigger_deformation(ball, current_time, wall_collision_nx, wall_collision_ny);
-        }
-    }
-}
-
-void handle_ball_collision(SoftBall* b1, SoftBall* b2, double current_time) {
-    float dx = b2->x - b1->x;
-    float dy = b2->y - b1->y;
-    float distance_squared = dx * dx + dy * dy;
-    float sum_radii = b1->base_radius + b2->base_radius;
-
-    if (distance_squared < sum_radii * sum_radii && distance_squared > 0.001f) {
-        float distance = sqrt(distance_squared);
-        float overlap = sum_radii - distance;
-        float nx = dx / distance;
-        float ny = dy / distance;
-        float separation_amount = overlap * 0.5f;
-        b1->x -= nx * separation_amount;
-        b1->y -= ny * separation_amount;
-        b2->x += nx * separation_amount;
-        b2->y += ny * separation_amount;
-
-        float v1_normal_scalar = b1->vx * nx + b1->vy * ny;
-        float v1_tx = b1->vx - v1_normal_scalar * nx;
-        float v1_ty = b1->vy - v1_normal_scalar * ny;
-        float v2_normal_scalar = b2->vx * nx + b2->vy * ny;
-        float v2_tx = b2->vx - v2_normal_scalar * nx;
-        float v2_ty = b2->vy - v2_normal_scalar * ny;
-
-        if (v1_normal_scalar - v2_normal_scalar > 0) {
-            float e = COEFFICIENT_OF_RESTITUTION;
-            float new_v1_normal_scalar = (v1_normal_scalar * (1.0f - e) + v2_normal_scalar * (1.0f + e)) / 2.0f;
-            float new_v2_normal_scalar = (v1_normal_scalar * (1.0f + e) + v2_normal_scalar * (1.0f - e)) / 2.0f;
-            b1->vx = new_v1_normal_scalar * nx + v1_tx;
-            b1->vy = new_v1_normal_scalar * ny + v1_ty;
-            b2->vx = new_v2_normal_scalar * nx + v2_tx;
-            b2->vy = new_v2_normal_scalar * ny + v2_ty;
-            trigger_deformation(b1, current_time, -nx, -ny);
-            trigger_deformation(b2, current_time, nx, ny);
-        }
-    }
-}
-
-int main() {
-    if (!al_init()) { fprintf(stderr, "Failed to initialize Allegro!\n"); return -1; }
-    if (!al_install_keyboard()) { fprintf(stderr, "Failed to install keyboard!\n"); return -1; }
-    if (!al_init_primitives_addon()) { fprintf(stderr, "Failed to initialize primitives addon!\n"); return -1; }
-    al_init_font_addon();
-    al_init_ttf_addon();
-    ALLEGRO_FONT* font = al_load_ttf_font("arial.ttf", 18, 0);
-    if (!font && SCREEN_W > 0) {
-        fprintf(stderr, "Failed to load 'arial.ttf'. Text display might be affected.\n");
-    }
-
-    ALLEGRO_TIMER* timer = al_create_timer(1.0 / FPS);
-    ALLEGRO_DISPLAY* display = al_create_display(SCREEN_W, SCREEN_H);
-    ALLEGRO_EVENT_QUEUE* event_queue = al_create_event_queue();
-
-    if (!timer || !display || !event_queue) {
-        fprintf(stderr, "Failed to create Allegro resources!\n");
-        if (timer) al_destroy_timer(timer);
-        if (display) al_destroy_display(display);
-        if (event_queue) al_destroy_event_queue(event_queue);
-        return -1;
-    }
-
-    al_register_event_source(event_queue, al_get_keyboard_event_source());
-    al_register_event_source(event_queue, al_get_timer_event_source(timer));
-    al_register_event_source(event_queue, al_get_display_event_source(display));
-
+// --- 遊戲引擎函式 ---
+bool engine_initialize() {
     srand(time(NULL));
 
-    ball_sprite = al_create_bitmap(BALL_SPRITE_RADIUS * 2, BALL_SPRITE_RADIUS * 2);
-    if (!ball_sprite) { fprintf(stderr, "Failed to create ball sprite bitmap!\n"); return -1; }
-    ALLEGRO_STATE old_state;
-    al_store_state(&old_state, ALLEGRO_STATE_TARGET_BITMAP);
-    al_set_target_bitmap(ball_sprite);
-    al_clear_to_color(al_map_rgba(0, 0, 0, 0));
-    al_draw_filled_circle(BALL_SPRITE_RADIUS, BALL_SPRITE_RADIUS, BALL_SPRITE_RADIUS, al_map_rgb(255, 255, 255));
-    al_restore_state(&old_state);
+    if (!al_init()) {
+        fprintf(stderr, "Failed to initialize Allegro!\n");
+        return false;
+    }
+    if (!al_install_keyboard()) { fprintf(stderr, "Failed to install keyboard!\n"); return false; }
+    timer = al_create_timer(1.0 / FPS);
+    if (!timer) { fprintf(stderr, "Failed to create timer!\n"); return false; }
+    display = al_create_display(SCREEN_WIDTH, SCREEN_HEIGHT);
+    if (!display) { fprintf(stderr, "Failed to create display!\n"); al_destroy_timer(timer); return false; }
+    al_set_window_title(display, "Enhanced Allegro Game (Scaled Sprites)");
+    if (!al_init_primitives_addon()) { fprintf(stderr, "Failed to init primitives addon!\n"); return false; }
+    if (!al_init_image_addon()) { fprintf(stderr, "Failed to init image addon!\n"); return false; }
+    al_init_font_addon(); // 初始化字型插件
+    if (!al_init_ttf_addon()) { fprintf(stderr, "Failed to init ttf addon!\n"); return false; } // 初始化 TTF 字型插件
 
-    SoftBall player;
-    // Player starts stationary
-    init_ball(&player, SCREEN_W / 2.0f, SCREEN_H / 2.0f, PLAYER_RADIUS, al_map_rgb(0, 255, 0), 0.0f, 0.0f);
-
-    SoftBall enemies[NUM_ENEMIES];
-    for (int i = 0; i < NUM_ENEMIES; ++i) {
-        init_enemy_ball(&enemies[i], // Use specific enemy init
-            (float)rand() / RAND_MAX * (SCREEN_W - ENEMY_RADIUS * 2) + ENEMY_RADIUS,
-            (float)rand() / RAND_MAX * (SCREEN_H - ENEMY_RADIUS * 2) + ENEMY_RADIUS,
-            ENEMY_RADIUS,
-            al_map_rgb(rand() % 156 + 100, rand() % 156 + 100, rand() % 156 + 100),
-            ENEMY_INIT_MAX_SPEED);
+    if (!al_install_audio()) {
+        fprintf(stderr, "Failed to initialize audio!\n"); return false;
+    }
+    if (!al_init_acodec_addon()) {
+        fprintf(stderr, "Failed to initialize audio codecs!\n"); return false;
+    }
+    if (!al_reserve_samples(2)) { // 為音效預留通道
+        fprintf(stderr, "Failed to reserve samples!\n"); return false;
     }
 
-    bool key_pressed[ALLEGRO_KEY_MAX] = { false };
-    bool running = true;
-    bool redraw = true;
-
+    event_queue = al_create_event_queue();
+    if (!event_queue) { fprintf(stderr, "Failed to create event queue!\n"); al_destroy_display(display); al_destroy_timer(timer); return false; }
+    al_register_event_source(event_queue, al_get_display_event_source(display));
+    al_register_event_source(event_queue, al_get_timer_event_source(timer));
+    al_register_event_source(event_queue, al_get_keyboard_event_source());
     al_start_timer(timer);
-    double current_time = al_get_time();
+    printf("Engine Initialized Successfully!\n");
+    return true;
+}
 
-    while (running) {
-        ALLEGRO_EVENT ev;
-        al_wait_for_event(event_queue, &ev);
+void init_player() {
+    player_x = SCREEN_WIDTH / 2.0;
+    // 設定玩家的寬度和高度為目標尺寸
+    player_width = PLAYER_TARGET_WIDTH;
+    player_height = PLAYER_TARGET_HEIGHT;
+    // 根據目標高度調整初始 Y 位置
+    player_y = SCREEN_HEIGHT - player_height - 10;
+}
 
-        if (ev.type == ALLEGRO_EVENT_TIMER) {
-            current_time = al_get_time();
+void init_collectibles() {
+    if (!star_image) {
+        printf("Star image not loaded, cannot initialize collectibles.\n");
+        return;
+    }
+    for (int i = 0; i < MAX_STARS; ++i) {
+        stars[i].image = star_image; // 指向全域的星星圖片
+        // 設定星星的寬度和高度為目標尺寸
+        stars[i].width = STAR_TARGET_WIDTH;
+        stars[i].height = STAR_TARGET_HEIGHT;
+        // 根據目標寬度隨機生成 X 位置
+        stars[i].x = rand() % (SCREEN_WIDTH - stars[i].width);
+        stars[i].y = rand() % (SCREEN_HEIGHT / 2); // 在螢幕上半部隨機生成 Y 位置
+        stars[i].active = true;
+    }
+}
 
-            // --- ��s���a�t�� (�[�t�שM�̤j�t�׭���) ---
-            if (key_pressed[ALLEGRO_KEY_UP] || key_pressed[ALLEGRO_KEY_W]) player.vy -= PLAYER_ACCELERATION;
-            if (key_pressed[ALLEGRO_KEY_DOWN] || key_pressed[ALLEGRO_KEY_S]) player.vy += PLAYER_ACCELERATION;
-            if (key_pressed[ALLEGRO_KEY_LEFT] || key_pressed[ALLEGRO_KEY_A]) player.vx -= PLAYER_ACCELERATION;
-            if (key_pressed[ALLEGRO_KEY_RIGHT] || key_pressed[ALLEGRO_KEY_D]) player.vx += PLAYER_ACCELERATION;
+void init_enemies() {
+    if (!enemy_image) {
+        printf("Enemy image not loaded, cannot initialize enemies.\n");
+        return;
+    }
+    for (int i = 0; i < MAX_ENEMIES; ++i) {
+        enemies[i].image = enemy_image; // 指向全域的敵人圖片
+        // 設定敵人的寬度和高度為目標尺寸
+        enemies[i].width = ENEMY_TARGET_WIDTH;
+        enemies[i].height = ENEMY_TARGET_HEIGHT;
+        // 根據目標寬度隨機生成 X 位置
+        enemies[i].x = rand() % (SCREEN_WIDTH - enemies[i].width);
+        // 調整 Y 軸生成範圍，確保敵人在指定範圍內且完整顯示
+        enemies[i].y = 50 + rand() % (SCREEN_HEIGHT / 3 - enemies[i].height);
+        if (enemies[i].y < 0) enemies[i].y = 50; // 避免 Y 座標為負
+        enemies[i].speed = 2.0f + (float)(rand() % 100) / 100.0f; // 隨機速度
+        enemies[i].direction = (rand() % 2 == 0) ? 1 : -1; // 隨機方向
+    }
+}
 
-            // ����a�̤j�t��
-            float player_speed_sq = player.vx * player.vx + player.vy * player.vy;
-            if (player_speed_sq > PLAYER_MAX_SPEED * PLAYER_MAX_SPEED) {
-                float player_speed_mag = sqrt(player_speed_sq);
-                player.vx = (player.vx / player_speed_mag) * PLAYER_MAX_SPEED;
-                player.vy = (player.vy / player_speed_mag) * PLAYER_MAX_SPEED;
-            }
-            // --- ���a�t�ק�s���� ---
+void engine_load_resources() {
+    player_image = al_load_bitmap(PLAYER_IMG_PATH);
+    if (!player_image) fprintf(stderr, "Failed to load %s!\n", PLAYER_IMG_PATH);
 
-            update_ball_position(&player, current_time);
-            update_deformation(&player, current_time);
+    star_image = al_load_bitmap(STAR_IMG_PATH);
+    if (!star_image) fprintf(stderr, "Failed to load %s!\n", STAR_IMG_PATH);
 
-            for (int i = 0; i < NUM_ENEMIES; ++i) {
-                update_ball_position(&enemies[i], current_time);
-                update_deformation(&enemies[i], current_time);
-            }
+    enemy_image = al_load_bitmap(ENEMY_IMG_PATH);
+    if (!enemy_image) fprintf(stderr, "Failed to load %s!\n", ENEMY_IMG_PATH);
 
-            for (int i = 0; i < NUM_ENEMIES; ++i) {
-                handle_ball_collision(&player, &enemies[i], current_time);
-            }
-            for (int i = 0; i < NUM_ENEMIES; ++i) {
-                for (int j = i + 1; j < NUM_ENEMIES; ++j) {
-                    handle_ball_collision(&enemies[i], &enemies[j], current_time);
+    background_image = al_load_bitmap(BACKGROUND_IMG_PATH);
+    if (!background_image) printf("Optional: Failed to load %s.\n", BACKGROUND_IMG_PATH);
+
+    game_font = al_load_ttf_font(FONT_PATH, 36, 0);
+    if (!game_font) fprintf(stderr, "Could not load font: %s (game over)\n", FONT_PATH);
+    score_font = al_load_ttf_font(FONT_PATH, 24, 0);
+    if (!score_font) fprintf(stderr, "Could not load font: %s (score)\n", FONT_PATH);
+
+    collect_sfx = al_load_sample(COLLECT_SFX_PATH);
+    if (!collect_sfx) fprintf(stderr, "Failed to load %s!\n", COLLECT_SFX_PATH);
+    hit_sfx = al_load_sample(HIT_SFX_PATH);
+    if (!hit_sfx) fprintf(stderr, "Failed to load %s!\n", HIT_SFX_PATH);
+
+    bgm = al_load_audio_stream(BGM_PATH, 4, 2048);
+    if (!bgm) {
+        fprintf(stderr, "Failed to load %s!\n", BGM_PATH);
+    }
+    else {
+        al_set_audio_stream_playmode(bgm, ALLEGRO_PLAYMODE_LOOP);
+        al_set_audio_stream_gain(bgm, 0.5); // 設定 BGM 音量
+        if (al_attach_audio_stream_to_mixer(bgm, al_get_default_mixer())) {
+            al_set_audio_stream_playing(bgm, true);
+            printf("BGM started (direct stream play).\n");
+        }
+        else {
+            fprintf(stderr, "Failed to attach BGM stream to mixer.\n");
+            al_destroy_audio_stream(bgm);
+            bgm = NULL;
+        }
+    }
+
+    // 初始化遊戲物件 (這時會使用目標尺寸)
+    init_player();
+    init_collectibles();
+    init_enemies();
+    printf("Resources Loaded.\n");
+}
+
+bool check_collision(float x1, float y1, int w1, int h1, float x2, float y2, int w2, int h2) {
+    // 碰撞檢測邏輯保持不變，因為 w1, h1, w2, h2 將傳入物件的目標尺寸
+    return !(x1 + w1 < x2 || x1 > x2 + w2 || y1 + h1 < y2 || y1 > y2 + h2);
+}
+
+void engine_handle_input(ALLEGRO_EVENT* ev) {
+    if (ev->type == ALLEGRO_EVENT_DISPLAY_CLOSE) {
+        game_running = false;
+        return;
+    }
+
+    // 遊戲結束時的輸入處理 (R鍵重新開始, ESC離開)
+    if (game_over) {
+        if (ev->type == ALLEGRO_EVENT_KEY_DOWN) { // 只處理按下事件
+            if (ev->keyboard.keycode == ALLEGRO_KEY_R) {
+                game_over = false;
+                score = 0;
+                init_player();
+                init_collectibles();
+                init_enemies();
+                if (bgm && !al_get_audio_stream_playing(bgm)) {
+                    al_set_audio_stream_playing(bgm, true);
                 }
             }
-            redraw = true;
-        }
-        else if (ev.type == ALLEGRO_EVENT_DISPLAY_CLOSE) {
-            running = false;
-        }
-        else if (ev.type == ALLEGRO_EVENT_KEY_DOWN) {
-            key_pressed[ev.keyboard.keycode] = true;
-        }
-        else if (ev.type == ALLEGRO_EVENT_KEY_UP) {
-            key_pressed[ev.keyboard.keycode] = false;
-            if (ev.keyboard.keycode == ALLEGRO_KEY_ESCAPE) {
-                running = false;
+            else if (ev->keyboard.keycode == ALLEGRO_KEY_ESCAPE) {
+                game_running = false;
             }
         }
+        return; // 如果遊戲結束，不處理後續的遊戲中按鍵
+    }
+
+    // 遊戲進行中的按鍵處理 (主要處理非移動的、一次性的按鍵)
+    if (ev->type == ALLEGRO_EVENT_KEY_DOWN) {
+        switch (ev->keyboard.keycode) {
+            // 移動鍵的處理移到 engine_update
+        case ALLEGRO_KEY_ESCAPE:
+            game_running = false;
+            break;
+            // 如果有其他一次性按鍵 (如跳躍、射擊)，可以在這裡處理 KEY_DOWN
+        }
+    }
+    // KEY_UP 事件通常用於釋放持續性動作，但由於我們用 al_get_keyboard_state()，這裡也不太需要了
+}
+
+void engine_update() {
+    if (game_over) return;
+
+    // --- 新增：使用 al_get_keyboard_state() 處理玩家持續移動 ---
+    ALLEGRO_KEYBOARD_STATE key_state;
+    al_get_keyboard_state(&key_state); // 獲取當前鍵盤狀態
+
+    if (al_key_down(&key_state, ALLEGRO_KEY_UP) || al_key_down(&key_state, ALLEGRO_KEY_W)) {
+        player_y -= player_speed;
+    }
+    if (al_key_down(&key_state, ALLEGRO_KEY_DOWN) || al_key_down(&key_state, ALLEGRO_KEY_S)) {
+        player_y += player_speed;
+    }
+    if (al_key_down(&key_state, ALLEGRO_KEY_LEFT) || al_key_down(&key_state, ALLEGRO_KEY_A)) {
+        player_x -= player_speed;
+    }
+    if (al_key_down(&key_state, ALLEGRO_KEY_RIGHT) || al_key_down(&key_state, ALLEGRO_KEY_D)) {
+        player_x += player_speed;
+    }
+    // --- 結束新增 ---
+
+
+    // 邊界檢測使用 player_width 和 player_height (已設為目標尺寸)
+    if (player_x < 0) player_x = 0;
+    if (player_x > SCREEN_WIDTH - player_width) player_x = SCREEN_WIDTH - player_width;
+    if (player_y < 0) player_y = 0;
+    if (player_y > SCREEN_HEIGHT - player_height) player_y = SCREEN_HEIGHT - player_height;
+
+    for (int i = 0; i < MAX_ENEMIES; ++i) {
+        enemies[i].x += enemies[i].speed * enemies[i].direction;
+        // 邊界檢測使用 enemies[i].width (已設為目標尺寸)
+        if (enemies[i].x <= 0 || enemies[i].x + enemies[i].width >= SCREEN_WIDTH) {
+            enemies[i].direction *= -1; // 改變方向
+            // 確保敵人不會卡在邊界外
+            if (enemies[i].x <= 0) enemies[i].x = 0;
+            if (enemies[i].x + enemies[i].width >= SCREEN_WIDTH) enemies[i].x = SCREEN_WIDTH - enemies[i].width;
+        }
+    }
+
+    for (int i = 0; i < MAX_STARS; ++i) {
+        if (stars[i].active &&
+            check_collision(player_x, player_y, player_width, player_height,
+                stars[i].x, stars[i].y, stars[i].width, stars[i].height)) {
+            stars[i].active = false;
+            score += 10;
+            if (collect_sfx) al_play_sample(collect_sfx, 1.0, 0.0, 1.0, ALLEGRO_PLAYMODE_ONCE, NULL);
+            printf("Star collected! Score: %d\n", score);
+
+            bool all_collected = true;
+            for (int j = 0; j < MAX_STARS; ++j) {
+                if (stars[j].active) {
+                    all_collected = false;
+                    break;
+                }
+            }
+            if (all_collected) {
+                printf("All stars collected! Regenerating...\n");
+                init_collectibles(); // 重新生成星星
+            }
+        }
+    }
+
+    for (int i = 0; i < MAX_ENEMIES; ++i) {
+        if (check_collision(player_x, player_y, player_width, player_height,
+            enemies[i].x, enemies[i].y, enemies[i].width, enemies[i].height)) {
+            if (hit_sfx) al_play_sample(hit_sfx, 1.0, 0.0, 1.0, ALLEGRO_PLAYMODE_ONCE, NULL);
+            printf("Hit by enemy! Game Over.\n");
+            game_over = true;
+            if (bgm) {
+                al_set_audio_stream_playing(bgm, false); // 遊戲結束時停止 BGM
+            }
+        }
+    }
+}
+
+void engine_render() {
+    if (background_image) {
+        // 繪製背景，使其填滿螢幕 (如果背景圖較小，可以考慮縮放或重複繪製)
+        al_draw_scaled_bitmap(background_image,
+            0, 0, al_get_bitmap_width(background_image), al_get_bitmap_height(background_image),
+            0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0);
+    }
+    else {
+        al_clear_to_color(al_map_rgb(20, 20, 80));
+    }
+
+
+    // 繪製星星 (縮放)
+    if (star_image) { // 檢查全域 star_image 是否載入
+        for (int i = 0; i < MAX_STARS; ++i) {
+            if (stars[i].active && stars[i].image) { // 也檢查 stars[i].image 是否有效
+                al_draw_scaled_bitmap(stars[i].image,
+                    0, 0, al_get_bitmap_width(stars[i].image), al_get_bitmap_height(stars[i].image), // 來源圖片的完整區域
+                    stars[i].x, stars[i].y, stars[i].width, stars[i].height, // 目標位置和目標尺寸
+                    0);
+            }
+        }
+    }
+    // 繪製敵人 (縮放)
+    if (enemy_image) { // 檢查全域 enemy_image 是否載入
+        for (int i = 0; i < MAX_ENEMIES; ++i) {
+            if (enemies[i].image) { // 也檢查 enemies[i].image 是否有效
+                al_draw_scaled_bitmap(enemies[i].image,
+                    0, 0, al_get_bitmap_width(enemies[i].image), al_get_bitmap_height(enemies[i].image), // 來源圖片的完整區域
+                    enemies[i].x, enemies[i].y, enemies[i].width, enemies[i].height, // 目標位置和目標尺寸
+                    0);
+            }
+        }
+    }
+    // 繪製玩家 (縮放)
+    if (player_image) {
+        al_draw_scaled_bitmap(player_image,
+            0, 0, al_get_bitmap_width(player_image), al_get_bitmap_height(player_image), // 來源圖片的完整區域
+            player_x, player_y, player_width, player_height, // 目標位置和目標尺寸
+            0);
+    }
+    else { // 如果圖片載入失敗，繪製一個使用目標尺寸的矩形作為替代
+        al_draw_filled_rectangle(player_x, player_y, player_x + player_width, player_y + player_height, al_map_rgb(0, 255, 0));
+    }
+
+    if (score_font) {
+        char score_text[50];
+        snprintf(score_text, sizeof(score_text), "Score: %d", score);
+        al_draw_text(score_font, al_map_rgb(255, 255, 255), 10, 10, ALLEGRO_ALIGN_LEFT, score_text);
+    }
+
+    if (game_over && game_font) {
+        al_draw_text(game_font, al_map_rgb(255, 0, 0), SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 50, ALLEGRO_ALIGN_CENTRE, "GAME OVER");
+        if (score_font) { // 使用較小的字型顯示提示訊息
+            al_draw_text(score_font, al_map_rgb(255, 255, 255), SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 20, ALLEGRO_ALIGN_CENTRE, "Press 'R' to Restart or 'ESC' to Exit");
+        }
+    }
+    al_flip_display();
+}
+
+void engine_cleanup() {
+    printf("Engine Cleaning Up...\n");
+    if (player_image) al_destroy_bitmap(player_image);
+    if (star_image) al_destroy_bitmap(star_image);
+    if (enemy_image) al_destroy_bitmap(enemy_image);
+    if (background_image) al_destroy_bitmap(background_image);
+    if (game_font) al_destroy_font(game_font);
+    if (score_font) al_destroy_font(score_font);
+    if (collect_sfx) al_destroy_sample(collect_sfx);
+    if (hit_sfx) al_destroy_sample(hit_sfx);
+
+    if (bgm) {
+        al_destroy_audio_stream(bgm);
+    }
+
+    if (timer) al_destroy_timer(timer);
+    if (display) al_destroy_display(display);
+    if (event_queue) al_destroy_event_queue(event_queue);
+
+    // 確保按照正確順序卸載 Allegro 插件
+    // 這些卸載函數會檢查相應的插件是否已初始化
+    al_shutdown_ttf_addon();
+    al_shutdown_font_addon();
+    al_shutdown_image_addon();
+    al_shutdown_primitives_addon();
+    al_uninstall_audio(); // 卸載音訊系統
+    al_uninstall_keyboard(); // 卸載鍵盤系統
+    // al_uninstall_system(); // 通常 al_init() 的逆操作，在程式結束時自動處理或由 OS 處理。
+                            // 在此處顯式調用可能導致後續的 printf 等無法正常工作。
+                            // 一般情況下不需要手動調用。
+
+    printf("Engine Cleanup Complete.\n");
+}
+/*
+int main(int argc, char** argv) {
+    if (!engine_initialize()) {
+        fprintf(stderr, "Game engine failed to initialize.\n");
+        return -1;
+    }
+    engine_load_resources(); // 資源載入後，物件的尺寸已根據目標尺寸設定
+
+    while (game_running) {
+        ALLEGRO_EVENT ev;
+        al_wait_for_event(event_queue, &ev); // 等待事件
+
+        if (ev.type == ALLEGRO_EVENT_TIMER) { // 計時器事件
+            // engine_update 內部會檢查 game_over
+            engine_update(); // 更新遊戲邏輯 (現在包含鍵盤狀態檢測和移動)
+            redraw = true; // 設定重繪標記
+        }
+        // 其他事件，如鍵盤(用於非移動操作)、顯示關閉等
+        engine_handle_input(&ev);
+
 
         if (redraw && al_is_event_queue_empty(event_queue)) {
             redraw = false;
-            al_clear_to_color(al_map_rgb(30, 30, 30));
-
-            float scale_x_player = player.current_radius_secondary / BALL_SPRITE_RADIUS;
-            float scale_y_player = player.current_radius_primary / BALL_SPRITE_RADIUS;
-            al_draw_tinted_scaled_rotated_bitmap(ball_sprite, player.color,
-                BALL_SPRITE_RADIUS, BALL_SPRITE_RADIUS,
-                player.x, player.y,
-                scale_x_player, scale_y_player,
-                player.deformation_angle - ALLEGRO_PI / 2.0f, 0);
-
-            for (int i = 0; i < NUM_ENEMIES; ++i) {
-                float scale_x_enemy = enemies[i].current_radius_secondary / BALL_SPRITE_RADIUS;
-                float scale_y_enemy = enemies[i].current_radius_primary / BALL_SPRITE_RADIUS;
-                al_draw_tinted_scaled_rotated_bitmap(ball_sprite, enemies[i].color,
-                    BALL_SPRITE_RADIUS, BALL_SPRITE_RADIUS,
-                    enemies[i].x, enemies[i].y,
-                    scale_x_enemy, scale_y_enemy,
-                    enemies[i].deformation_angle - ALLEGRO_PI / 2.0f, 0);
-            }
-
-            if (font) {
-                al_draw_text(font, al_map_rgb(255, 255, 255), 10, 10, 0, "WASD/Arrows: Accelerate. ESC: Quit.");
-            }
-            al_flip_display();
+            engine_render(); // 渲染畫面
         }
     }
 
-    if (ball_sprite) al_destroy_bitmap(ball_sprite);
-    if (font) al_destroy_font(font);
-    al_destroy_timer(timer);
-    al_destroy_display(display);
-    al_destroy_event_queue(event_queue);
-    al_shutdown_primitives_addon();
-    al_shutdown_font_addon();
-    al_shutdown_ttf_addon();
+    engine_cleanup(); // 清理資源
     return 0;
 }
+*/
